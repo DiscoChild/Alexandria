@@ -4,6 +4,8 @@
 #include "AlexandriaGameMode.h"
 #include "AlexandriaCharacter.h"
 
+DEFINE_LOG_CATEGORY( AlexandriaLog );
+
 AAlexandriaGameMode::AAlexandriaGameMode()
 {
 	// set default pawn class to our Blueprinted character

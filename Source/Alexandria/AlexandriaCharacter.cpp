@@ -3,40 +3,138 @@
 #include "Alexandria.h"
 #include "Kismet/HeadMountedDisplayFunctionLibrary.h"
 #include "AlexandriaCharacter.h"
+#include "PrecomputedLightVolume.h"
+#include "Components/LightComponent.h"
+#include "Runtime/Engine/Classes/Engine/Engine.h"
+#include "Runtime/Engine/Classes/Engine/Light.h"
+#include "Runtime/Engine/Classes/Engine/DirectionalLight.h"
+#include "Runtime/Engine/Classes/Engine/PointLight.h"
+#include "Runtime/Engine/Public/SceneManagement.h"
+#include "Engine/LocalPlayer.h"
+#include "EngineUtils.h"
+#include "DrawDebugHelpers.h"
+#include "Engine/LevelBounds.h"
+#include "CollisionQueryParams.h"
+#include "Materials/MaterialInstanceDynamic.h"
 
+#define print_color(text, time, color) if (GEngine) GEngine->AddOnScreenDebugMessage(-1, time, color, text)
+#define print(text) if (GEngine) GEngine->AddOnScreenDebugMessage(-1, 1.5, FColor::White, text )
 //////////////////////////////////////////////////////////////////////////
 // AAlexandriaCharacter
 
-AAlexandriaCharacter::AAlexandriaCharacter()
+const FName AAlexandriaCharacter::EmissiveStrName( TEXT( "EmissiveStrength" ) );
+const FName AAlexandriaCharacter::MatOpacityName( TEXT( "Opacity" ) );
+
+AAlexandriaCharacter::AAlexandriaCharacter():
+	Lucidity(0.f),
+	SunIntensity(0.f),
+	AbsorbtionRate(3.f), 
+	ConsumptionRate(3.f)
+
 {
-	// Set size for collision capsule
-	GetCapsuleComponent()->InitCapsuleSize(42.f, 96.0f);
+	
 
-	// set our turn rates for input
-	BaseTurnRate = 45.f;
-	BaseLookUpRate = 45.f;
+	// Capsule Component
+	{
+		
+		// Set size for collision capsule
+		SetRootComponent( GetCapsuleComponent() );
+		GetCapsuleComponent()->InitCapsuleSize( 42.f, 96.0f );
+		
+		//SetRootComponent( GetCapsuleComponent() );
+		PrimaryActorTick.bCanEverTick = true;
+	}
 
-	// Don't rotate when the controller rotates. Let that just affect the camera.
-	bUseControllerRotationPitch = false;
-	bUseControllerRotationYaw = false;
-	bUseControllerRotationRoll = false;
+	// Radiance Setup
+	{
+		
+		static ConstructorHelpers::FObjectFinder<UMaterial> RadMatRef( TEXT( "Material'/Game/ThirdPersonCPP/Meshes/RadianceGlobeMaterial.RadianceGlobeMaterial'" ) );
+		if (RadMatRef.Succeeded()) {
+			RadianceMaterial = RadMatRef.Object;
+		}
+		RadianceLight = CreateDefaultSubobject<UPointLightComponent>( TEXT( "RadianceLight" ) );
+		static ConstructorHelpers::FObjectFinder<UStaticMesh> StaticRadianceGlobe( TEXT( "StaticMesh'/Game/ThirdPersonCPP/Meshes/RadianceGlobeSphere.RadianceGlobeSphere'" ) );
+		RadianceGlobeMesh = StaticRadianceGlobe.Object;
 
-	// Configure character movement
-	GetCharacterMovement()->bOrientRotationToMovement = true; // Character moves in the direction of input...	
-	GetCharacterMovement()->RotationRate = FRotator(0.0f, 540.0f, 0.0f); // ...at this rotation rate
-	GetCharacterMovement()->JumpZVelocity = 600.f;
-	GetCharacterMovement()->AirControl = 0.2f;
+		RadianceGlobe = CreateDefaultSubobject<UStaticMeshComponent>( TEXT( "RadianceGlobe" ) );
+		RadianceGlobe->SetStaticMesh( RadianceGlobeMesh );
+		RadianceGlobe->bOwnerNoSee = false;
+		RadianceGlobe->bCastDynamicShadow = true;
+		RadianceGlobe->CastShadow = true;
+		RadianceGlobe->SetSimulatePhysics( false );
+		RadianceGlobe->BodyInstance.SetObjectType( ECollisionChannel::ECC_WorldDynamic );
+		RadianceGlobe->BodyInstance.SetCollisionEnabled( ECollisionEnabled::QueryOnly );
+		RadianceGlobe->BodyInstance.SetResponseToAllChannels( ECollisionResponse::ECR_Ignore );
+		RadianceGlobe->BodyInstance.SetResponseToChannel( ECollisionChannel::ECC_Pawn, ECollisionResponse::ECR_Block );
+		RadianceGlobe->BodyInstance.SetResponseToChannel( ECollisionChannel::ECC_WorldStatic, ECollisionResponse::ECR_Block );
+		RadianceGlobe->BodyInstance.SetResponseToChannel( ECollisionChannel::ECC_WorldDynamic, ECollisionResponse::ECR_Block );
+		RadianceGlobe->Mobility = EComponentMobility::Movable;
+		RadianceGlobe->SetHiddenInGame( false );
 
-	// Create a camera boom (pulls in towards the player if there is a collision)
-	CameraBoom = CreateDefaultSubobject<USpringArmComponent>(TEXT("CameraBoom"));
-	CameraBoom->SetupAttachment(RootComponent);
-	CameraBoom->TargetArmLength = 300.0f; // The camera follows at this distance behind the character	
-	CameraBoom->bUsePawnControlRotation = true; // Rotate the arm based on the controller
+		static const FName SMSocketName( TEXT( "BackSocket" ) );
+		static const FName CenterSocket( TEXT( "Center" ) );
+		RadianceLight->SetupAttachment( GetMesh(), SMSocketName );
+		RadianceGlobe->SetupAttachment( RadianceLight );
+		RadianceGlobe->bAutoRegister = true;
 
-	// Create a follow camera
-	FollowCamera = CreateDefaultSubobject<UCameraComponent>(TEXT("FollowCamera"));
-	FollowCamera->SetupAttachment(CameraBoom, USpringArmComponent::SocketName); // Attach the camera to the end of the boom and let the boom adjust to match the controller orientation
-	FollowCamera->bUsePawnControlRotation = false; // Camera does not rotate relative to arm
+	}
+
+	// FLucidMovement Base values
+	{
+		LucidAirControl.Base = 0.2f;
+		LucidGravity.Base = GetCharacterMovement()->GravityScale;
+		LucidMoveSpeed.Base = GetCharacterMovement()->MaxWalkSpeed;
+		LucidAcceleration.Base = GetCharacterMovement()->MaxAcceleration;
+		LucidLateralAirFriction.Base = GetCharacterMovement()->FallingLateralFriction;
+		LucidJumpZ.Base = 600.f;
+		SunlightIntensity.Base = 2500.f;
+
+		RadianceGlobe->GetMaterial( 0 )->GetScalarParameterValue( MatOpacityName, MaterialOpacity.Base );
+		RadianceGlobe->GetMaterial( 0 )->GetScalarParameterValue( EmissiveStrName, EmissiveStrength.Base );
+	}
+
+	
+	// Player Input/Controls
+	{
+		// set our turn rates for input
+		BaseTurnRate = 45.f;
+		BaseLookUpRate = 45.f;
+
+		// Don't rotate when the controller rotates. Let that just affect the camera.
+		bUseControllerRotationPitch = false;
+		bUseControllerRotationYaw = false;
+		bUseControllerRotationRoll = false;
+
+	}
+
+	// Player Movement
+	{
+		// Configure character movement
+		GetCharacterMovement()->bOrientRotationToMovement = true; // Character moves in the direction of input...	
+		GetCharacterMovement()->RotationRate = FRotator( 0.0f, 540.0f, 0.0f ); // ...at this rotation rate
+		GetCharacterMovement()->JumpZVelocity = LucidJumpZ.Base;
+		GetCharacterMovement()->AirControl = LucidAirControl.Base;
+		GetCharacterMovement()->BrakingDecelerationFalling = GetCharacterMovement()->BrakingDecelerationWalking / 2.f;
+		GetCharacterMovement()->bForceMaxAccel = false;
+	}
+
+	// Camera Setup
+	{
+		// Create a camera boom (pulls in towards the player if there is a collision)
+		CameraBoom = CreateDefaultSubobject<USpringArmComponent>( TEXT( "CameraBoom" ) );
+		CameraBoom->SetupAttachment( RootComponent );
+		CameraBoom->TargetArmLength = 300.0f; // The camera follows at this distance behind the character	
+		CameraBoom->bUsePawnControlRotation = true; // Rotate the arm based on the controller
+
+		// Create a follow camera
+		FollowCamera = CreateDefaultSubobject<UCameraComponent>( TEXT( "FollowCamera" ) );
+		FollowCamera->SetupAttachment( CameraBoom, USpringArmComponent::SocketName ); // Attach the camera to the end of the boom and let the boom adjust to match the controller orientation
+		FollowCamera->bUsePawnControlRotation = false; // Camera does not rotate relative to arm
+	}
+
+	SunColor = RadianceLight->GetLightColor();
+
+
 
 	// Note: The skeletal mesh and anim blueprint references on the Mesh component (inherited from Character) 
 	// are set in the derived blueprint asset named MyCharacter (to avoid direct content references in C++)
@@ -47,6 +145,7 @@ AAlexandriaCharacter::AAlexandriaCharacter()
 
 void AAlexandriaCharacter::SetupPlayerInputComponent(class UInputComponent* PlayerInputComponent)
 {
+	
 	// Set up gameplay key bindings
 	check(PlayerInputComponent);
 	PlayerInputComponent->BindAction("Jump", IE_Pressed, this, &ACharacter::Jump);
@@ -69,6 +168,54 @@ void AAlexandriaCharacter::SetupPlayerInputComponent(class UInputComponent* Play
 
 	// VR headset functionality
 	PlayerInputComponent->BindAction("ResetVR", IE_Pressed, this, &AAlexandriaCharacter::OnResetVR);
+}
+
+float AAlexandriaCharacter::CalcLucidity( const float DeltaSeconds )
+{
+	// Data to be collected
+	FSHVectorRGB3 Radiance;
+	float Shadowing = 0.f;
+	float Weight = 0.f;
+	FVector SkyBent = FVector::ZeroVector;
+	const FBoxSphereBounds PlayerBounds( GetCapsuleComponent()->Bounds );
+
+	// Get Lucidity from Light Levels affecting player
+	const float TickLucidity = (GetSolarIllumination( 4 ) + CalcDynamicLightRadiance( 4 )) / SunIntensity;
+	float DeltaLucidity = TickLucidity - GetLucidity();
+	const float MaxDeltaLucidity = SunIntensity*AbsorbtionRate*DeltaSeconds / SunIntensity;
+	
+	if (DeltaLucidity > 0.f)
+	{
+		DeltaLucidity = FMath::Min<float>( DeltaLucidity, MaxDeltaLucidity );
+	}
+	else if (DeltaLucidity < 0.f)
+	{
+		DeltaLucidity = -1.f*FMath::Min<float>( FMath::Abs<float>(DeltaLucidity), MaxDeltaLucidity );
+	}
+	return FMath::Clamp<float>( GetLucidity()+DeltaLucidity, 0.f, 1.f );
+}
+
+void AAlexandriaCharacter::UpdateMovementParams( const float DeltaSeconds )
+{
+	UCharacterMovementComponent *Mvmt = GetCharacterMovement();
+	// Apply Scalar
+	Mvmt->AirControl = LucidAirControl.GetProperty(Lucidity);
+	Mvmt->MaxAcceleration = LucidAcceleration.GetProperty( Lucidity );
+	Mvmt->MaxWalkSpeed = LucidMoveSpeed.GetProperty(Lucidity);
+	Mvmt->GravityScale = LucidGravity.GetProperty( Lucidity );
+	Mvmt->FallingLateralFriction = LucidLateralAirFriction.GetProperty( Lucidity );
+	Mvmt->JumpZVelocity = LucidJumpZ.GetProperty( Lucidity );
+
+	// Apply Inv Scalar
+	
+
+	// Debug Prints
+	print_color( FString::Printf( TEXT( "MaxWalkSpeed:    %f" ), Mvmt->MaxWalkSpeed ), DeltaSeconds, FColor::White );
+	print_color( FString::Printf( TEXT( "MaxAccelaration: %f" ), Mvmt->MaxAcceleration ), DeltaSeconds, FColor::White );
+	print_color( FString::Printf( TEXT( "JumpZVelocity:   %f" ), Mvmt->JumpZVelocity ), DeltaSeconds, FColor::White );
+	print_color( FString::Printf( TEXT( "GravityScale:    %f" ), Mvmt->GravityScale ), DeltaSeconds, FColor::White );
+	print_color( FString::Printf( TEXT( "AirControl:      %f" ), Mvmt->AirControl ), DeltaSeconds, FColor::White );
+
 }
 
 
@@ -101,7 +248,7 @@ void AAlexandriaCharacter::LookUpAtRate(float Rate)
 
 void AAlexandriaCharacter::MoveForward(float Value)
 {
-	if ((Controller != NULL) && (Value != 0.0f))
+	if ((Controller != nullptr) && (Value != 0.0f))
 	{
 		// find out which way is forward
 		const FRotator Rotation = Controller->GetControlRotation();
@@ -115,7 +262,7 @@ void AAlexandriaCharacter::MoveForward(float Value)
 
 void AAlexandriaCharacter::MoveRight(float Value)
 {
-	if ( (Controller != NULL) && (Value != 0.0f) )
+	if ( (Controller != nullptr) && (Value != 0.0f) )
 	{
 		// find out which way is right
 		const FRotator Rotation = Controller->GetControlRotation();
@@ -127,3 +274,332 @@ void AAlexandriaCharacter::MoveRight(float Value)
 		AddMovementInput(Direction, Value);
 	}
 }
+void AAlexandriaCharacter::DebugPrintRadiance( const float DrawTime, const FVector PollPoint, const FSHVectorRGB3 &Radiance, const float Shadowing, const float Weight, const FVector &SkyBent, const float Luminance ) const
+{
+	if (GEngine) {
+		FLinearColor IntegralRadiance = Radiance.CalcIntegral();
+		const FColor TextColor = IntegralRadiance.ToFColor( true );
+		GEngine->AddOnScreenDebugMessage( INDEX_NONE,
+			DrawTime,
+			FColor::White,
+			FString::Printf( TEXT( "Poll Point: %s" ), *PollPoint.ToString() ) );
+
+		const FString LuminanceMsg = FString::Printf( TEXT( "Luminance: %f" ), Luminance );
+		GEngine->AddOnScreenDebugMessage( INDEX_NONE,
+			DrawTime,
+			TextColor,
+			LuminanceMsg );
+
+		GEngine->AddOnScreenDebugMessage( INDEX_NONE,
+			DrawTime,
+			TextColor,
+			FString::Printf( TEXT( "IntegralRadiance: %s" ), *IntegralRadiance.ToString() ) );
+
+		GEngine->AddOnScreenDebugMessage( INDEX_NONE,
+			DrawTime,
+			FColor::White,
+			FString::Printf( TEXT( "Shadowing: %f" ), Shadowing ) );
+
+		GEngine->AddOnScreenDebugMessage( INDEX_NONE,
+			DrawTime,
+			FColor::White,
+			FString::Printf( TEXT( "Weight: %f" ), Weight ) );
+
+		GEngine->AddOnScreenDebugMessage( INDEX_NONE,
+			DrawTime,
+			FColor::White,
+			FString::Printf( TEXT( "SkyBent: %s" ), *SkyBent.ToString() ) );
+	}
+}
+
+void AAlexandriaCharacter::Tick( float DeltaSeconds )
+{
+	Super::Tick( DeltaSeconds );
+	Lucidity = CalcLucidity( DeltaSeconds );
+	GetRadianceLight()->SetIntensity( SunlightIntensity.GetProperty( Lucidity ) );
+	GetRadianceLight()->SetLightColor( SunColor*Lucidity );
+	RadianceGlobe->SetScalarParameterValueOnMaterials( MatOpacityName, MaterialOpacity.GetProperty(Lucidity));
+	RadianceGlobe->SetScalarParameterValueOnMaterials( EmissiveStrName, EmissiveStrength.GetProperty( Lucidity ) );
+	RadianceGlobe->GetMaterial( 0 )->SetEmissiveBoost( Lucidity );
+	RadianceGlobe->GetMaterial( 0 )->SetDiffuseBoost( Lucidity );
+	UpdateMovementParams( DeltaSeconds );
+
+	// Debug Prints
+	float print_val = -1.f;
+	RadianceGlobe->GetMaterial( 0 )->GetScalarParameterValue( MatOpacityName, print_val );
+	print_color( FString::Printf( TEXT( "MatOpacity: %f" ), print_val ), DeltaSeconds, FColor::White );
+
+	print_val = -1.f;
+	RadianceGlobe->GetMaterial( 0 )->GetScalarParameterValue( EmissiveStrName, print_val );
+	print_color( FString::Printf( TEXT( "EmissiveStr: %f" ), print_val ), DeltaSeconds, FColor::White );
+
+	/*
+	DrawDebugString( GetWorld(), 
+		(FVector(GetCapsuleComponent()->Bounds.Origin.X, GetCapsuleComponent()->Bounds.Origin.Y, GetCapsuleComponent()->Bounds.Origin.Z+50.f)- GetCapsuleComponent()->Bounds.Origin), 
+		FString::SanitizeFloat( GetLucidity() ), 
+		this, 
+		GetSun()->GetLightComponent()->GetLightColor().ToFColor(false), 
+		DeltaSeconds, 
+		false );
+		*/
+	//DebugPrintRadiance( DeltaSeconds, PlayerBounds.GetBox().GetCenter(), Radiance, Shadowing, Weight, SkyBent, GetLucidity() );
+
+}
+
+void AAlexandriaCharacter::PostInitializeComponents()
+{
+	Super::PostInitializeComponents();
+	if (RadianceMaterial == nullptr)
+	{
+		return;
+	}
+	RadianceMaterialInst = UMaterialInstanceDynamic::Create(RadianceMaterial, this, FName(TEXT("DynamicRadianceInst") ));
+	RadianceGlobe->SetMaterial( 0, RadianceMaterialInst );
+}
+
+void AAlexandriaCharacter::BeginPlay()
+{
+	Super::BeginPlay();
+	if (Sun == nullptr)
+	{
+		TActorIterator<ADirectionalLight> DLightItr( GetWorld() );
+		if (DLightItr) {
+			Sun = *DLightItr;
+		}
+
+		/*
+		GetRadianceLight()->SetLightColor( GetSun()->GetLightComponent()->GetLightColor() );
+		GetRadianceLight()->SetIntensity( GetSun()->GetLightComponent()->Intensity );
+		GetRadianceLight()->SetIndirectLightingIntensity( GetSun()->GetLightComponent()->IndirectLightingIntensity );
+		GetRadianceLight()->Activate();
+		*/
+	}
+}
+
+ULocalPlayer* AAlexandriaCharacter::GetLocalPlayer() const
+{
+	ULocalPlayer* LocPlayer = nullptr;
+	if (GetController()->IsLocalPlayerController())
+	{
+		LocPlayer = Cast<APlayerController, AController>(GetController())->GetLocalPlayer();
+	}
+	return LocPlayer;
+}
+
+FSceneView* AAlexandriaCharacter::GetPlayerSceneView( ULocalPlayer* LocPlayer )
+{
+	if (LocPlayer != nullptr)
+	{
+		FSceneViewFamilyContext ViewFamily( FSceneViewFamily::ConstructionValues(
+			LocPlayer->ViewportClient->Viewport,
+			LocPlayer->GetWorld()->Scene,
+			LocPlayer->ViewportClient->EngineShowFlags ).SetRealtimeUpdate( true ) );
+		FVector ViewLocation;
+		FRotator ViewRotation;
+
+		return LocPlayer->CalcSceneView( &ViewFamily, ViewLocation, ViewRotation, LocPlayer->ViewportClient->Viewport );
+	}
+	return nullptr;
+}
+
+float AAlexandriaCharacter::CalcPlayerIncidentRadiance( const FBoxSphereBounds &Bounds, FSHVectorRGB3 &Radiance, float &Shadowing, float &Weight, FVector &SkyBent ) const
+{
+	const FLevelCollection* const ActiveLevels = GetWorld()->GetActiveLevelCollection();
+	if (ActiveLevels == nullptr)
+	{
+		return 0.f;
+	}
+	const FVector PollPoint = Bounds.GetBox().GetCenter();
+
+	TArray<FSHVectorRGB3> RadianceArray;
+	TArray<float> WeightArray;
+	TArray<float> ShadowingArray;
+	TArray<float> LuminanceArray;
+	TArray<FVector> SkyBentArray;
+	const FSHVector3 Ambient = FSHVector3::AmbientFunction();
+
+	FSHVectorRGB3 LocRadiance;
+	float LocWeight = 0.f;
+	float LocShadowing = 0.f;
+	float LocLuminance = 0.f;
+	FVector LocSkyBent = FVector::ZeroVector;	
+	
+	for (TSet<ULevel*>::TConstIterator LevelIter( ActiveLevels->GetLevels().CreateConstIterator() );
+		LevelIter; ++LevelIter)
+	{
+		ULevel* Level = *LevelIter;
+		FPrecomputedLightVolume* PLV = Level->PrecomputedLightVolume;
+		PLV->InterpolateIncidentRadiancePoint( PollPoint, LocWeight, LocShadowing, LocRadiance, LocSkyBent );
+	}
+	if (LocWeight != 0.f)
+	{
+		const float InvWeight = 1.f / LocWeight;
+		LocRadiance *= InvWeight;
+		LocShadowing *= InvWeight;
+	}
+	LocLuminance = Dot( LocRadiance, Ambient ).GetLuminance();
+	//LocLuminance = LocRadiance.GetLuminance().CalcIntegral();
+
+	Radiance += LocRadiance;
+	SkyBent += LocSkyBent;
+	Weight += LocWeight;
+	Shadowing += LocShadowing;
+	return LocLuminance;
+}
+
+
+
+float AAlexandriaCharacter::CalcDynamicLightRadiance( const int32 AvailableTraces ) const
+{
+	float Intensity = 0.f;
+	int32 TraceCount = 0;
+	for (TActorIterator<APointLight> LightIter( GetWorld(), APointLight::StaticClass() ); LightIter; ++LightIter)
+	{
+		if (TraceCount >= AvailableTraces)
+		{
+			break;
+		}
+		APointLight *Light = *LightIter;
+		if ((Light == nullptr) || (Light->GetLightComponent()->AffectsPrimitive( GetMesh() ) == false))
+		{
+			continue;
+		}
+
+		//Get Light info for calculating effect on player
+		ULightComponent *LightComp = Light->GetLightComponent();
+		const float LRadius = FMath::Abs<float>( LightComp->SceneProxy->GetRadius() );
+		if (FMath::Abs( LRadius ) < SMALL_NUMBER)
+		{
+			// Something not right here...
+			continue;
+		}
+		const FVector LightPos = FVector( LightComp->GetLightPosition() );
+		const float DistanceToPlayer = FMath::Abs<float>( FVector::Dist( LightPos, GetActorLocation() ) );
+		const float LIntensity = LightComp->ComputeLightBrightness();
+
+		const float effect = (LIntensity *(DistanceToPlayer / FMath::Max<float>( LRadius, DistanceToPlayer )));
+		Intensity += effect;
+		++TraceCount;
+	}
+	if (TraceCount > 0)
+	{
+		return Intensity / (float)TraceCount;
+	}
+	return Intensity;
+
+}
+
+float AAlexandriaCharacter::GetSolarIllumination( const int32 AvailableTraces )
+{
+	if (GetSun() == nullptr) {
+		return 0.f;
+	}
+	
+	// return value
+	float Solarity = 0.f;
+	int32 TraceCount = 0;
+	//Get Light info for calculating effect on player
+	ULightComponent *LightComp = GetSun()->GetLightComponent();
+	const FVector LightPos( LightComp->GetLightPosition() );
+	const float Intensity = LightComp->ComputeLightBrightness();
+
+	
+
+	// Update SunlightIntensity
+	SunIntensity = Intensity;
+	RadianceColor = LightComp->GetLightColor();
+
+	// Get ray traces projected onto plane
+	FVector Plane( LightComp->GetDirection() );
+	if (!Plane.IsNormalized())
+	{
+		Plane.Normalize();
+	}
+	const FVector InvPlane( Plane*-1.f );
+	for (int32 i = 0; i < AvailableTraces; i++)
+	{
+		// Seed start position
+		FVector Start( LightPos );
+		FVector End( GetPollPoint() );
+		FVector EndVector( End - GetActorLocation() );
+
+		// Project End onto inverse plane
+		float cs = FVector::DotProduct( EndVector.GetSafeNormal(), InvPlane );
+		if (cs > SMALL_NUMBER)
+		{
+			End = End + InvPlane*(FVector::DotProduct( EndVector, InvPlane ) / cs);
+		}
+
+		float t = 0.f;
+		// Get the projected starting point on the plane from the End point
+		FVector EndStartVec( Start - End );
+		cs = FVector::DotProduct( EndStartVec.GetSafeNormal(), Plane );
+		if (cs > SMALL_NUMBER)
+		{
+			t = FVector::DotProduct( EndStartVec, Plane ) / cs;
+			Start = End + (InvPlane*t);
+		}
+		
+		/*
+		t = 0.f;
+		FVector StartEndVec( End - Start );
+		cs = FVector::DotProduct( StartEndVec.GetSafeNormal(), InvPlane );
+		if (cs > SMALL_NUMBER)
+		{
+			t = (FVector::DotProduct( StartEndVec, InvPlane ) / cs)* 0.75f;
+			End = Start + (Plane*t);
+		}
+		*/
+		
+
+		FVector HitLocation = FVector::ZeroVector;
+		FVector HitNormal = FVector::ForwardVector;
+		FHitResult Result = FHitResult( ForceInit );
+		FCollisionQueryParams CollQParms = FCollisionQueryParams::DefaultQueryParam;
+		CollQParms.bTraceComplex = true;
+		bool bHitPlayer = GetWorld()->LineTraceSingleByProfile( Result, Start, End, UCollisionProfile::BlockAll_ProfileName, CollQParms );
+		AActor *HitActor = Result.GetActor();
+		if ((HitActor == nullptr) || (HitActor == this))
+		{
+			Solarity += Intensity;
+			DrawDebugLine( GetWorld(), Start, End, LightComp->GetLightColor().ToFColor( false ), false, GetWorld()->GetDeltaSeconds()*FMath::FRandRange(1.f, 5.f) );
+
+		}
+		else
+		{
+			//DrawDebugLine( GetWorld(), Start, End, LightComp->GetLightColor().ToFColor(true), false, GetWorld()->GetDeltaSeconds()*5.f );
+			//print_color( FString::Printf( TEXT( "%s Hit Actor: %s" ), *Light->GetFName().ToString(), *HitActor->GetFName().ToString()  ), GetWorld()->GetDeltaSeconds(), FColor::Red );
+		}
+
+	}
+
+	if (AvailableTraces > 0)
+	{
+		return Solarity / (float)AvailableTraces;
+	}
+	return Solarity;
+}
+
+void AAlexandriaCharacter::GetPollPoints( TArray<FVector>& OutPoints ) const
+{
+	FVector PlayerEyesPos;
+	FRotator PlayerEyesRot;
+	GetActorEyesViewPoint( PlayerEyesPos, PlayerEyesRot );
+	FBoxSphereBounds PlayerBounds( GetCapsuleComponent()->Bounds );
+	OutPoints.AddUnique( FVector( PlayerBounds.Origin.X + 50.f, PlayerBounds.Origin.Y, PlayerBounds.Origin.Z) );
+	OutPoints.AddUnique( FVector( PlayerBounds.Origin.X - 50.f, PlayerBounds.Origin.Y, PlayerBounds.Origin.Z) );
+	OutPoints.AddUnique( FVector( PlayerEyesPos.X, PlayerEyesPos.Y, PlayerEyesPos.Z + 10.f ) );
+	OutPoints.AddUnique( FVector( PlayerBounds.Origin.X, PlayerBounds.Origin.Y, PlayerBounds.Origin.Z*2.f - PlayerBounds.GetBoxExtrema( 1 ).Z ) );
+}
+
+FVector AAlexandriaCharacter::GetPollPoint() const
+{
+	FVector PollPoint( GetActorLocation() );
+	PollPoint.X += FMath::FRandRange( -50.f, 50.f );
+	PollPoint.Y += FMath::FRandRange( -50.f, 50.f );
+	PollPoint.Z += FMath::FRandRange( -100.f, 100.f );
+
+	return PollPoint;
+}
+
+
