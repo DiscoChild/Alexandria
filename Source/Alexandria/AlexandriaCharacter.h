@@ -54,6 +54,12 @@ class AAlexandriaCharacter : public ACharacter
 	
 	class UMaterialInstanceDynamic* RadianceMaterialInst;
 
+	class UParticleSystem* RadianceFireEmitter;
+
+	UPROPERTY( VisibleAnywhere, BlueprintReadWrite, Category = "Lucidity (Radiance)", meta = (AllowPrivateAccess = "true") )
+	class UParticleSystemComponent* RadianceFire;
+	
+
 protected:
 	
 
@@ -103,14 +109,25 @@ protected:
 	UPROPERTY( Category = "Lucidity (Radiance)", EditAnywhere, BlueprintReadWrite )
 	struct FLucidMoveProperty SunlightIntensity;
 
+	struct FLucidMoveProperty SunlightTemperature;
+
+	UPROPERTY( Category = "Lucidity (Radiance)", EditAnywhere, BlueprintReadWrite )
+	uint32 bInnerRadiance : 1;
+
+	UPROPERTY( Category = "Lucidity (Radiance)", EditAnywhere, BlueprintReadWrite )
+	float InnerRadianceDecayTime;
+
+
+
 
 
 	// Rate at which Lucidity decays when exposed to shadow
 	UPROPERTY( Category = "Lucidity (Radiance)", EditAnywhere, BlueprintReadWrite, meta=( ClampMin = "0", UIMin = "0" ) )
-	float AbsorbtionRate;
+	float AbsorbVelocity;
 
 	UPROPERTY( Category = "Lucidity (Radiance)", EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0", UIMin = "0") )
-	float ConsumptionRate;
+	float ConsumeVelocity;
+
 
 
 public:
@@ -130,6 +147,12 @@ public:
 	FORCEINLINE static float GetMoveScalar( FLucidMoveProperty LucidMove, const float LucidValue) { return LucidMove.Min + LucidValue*(LucidMove.Max - LucidMove.Min); }
 
 protected:
+
+	UFUNCTION( BlueprintCallable )
+	void GiveInnerRadiance() { bInnerRadiance = true; }
+
+	UFUNCTION( BlueprintCallable )
+	bool HasInnerRadiance() const { return bInnerRadiance; }
 
 	/** Resets HMD orientation in VR. */
 	void OnResetVR();
@@ -159,8 +182,6 @@ protected:
 	// Updates the Sun properties and gets its current effect on the player
 	float GetSolarIllumination( const int32 AvailableTraces );
 
-	void GetPollPoints( TArray<FVector> &OutPoints ) const;
-
 	FVector GetPollPoint() const;
 
 	//float GetLuminanceOfBlock( const FBoxSphereBounds &Bounds );
@@ -184,17 +205,14 @@ private:
 	float SunIntensity;
 
 	FLinearColor SunColor;
+	// Determines whether or not Lucidity is maintained when exposed to darkness.
 
 	static const FName MatOpacityName;
 	static const FName EmissiveStrName;
 
 	float CalcLucidity( const float DeltaSeconds );
 	void UpdateMovementParams( const float DeltaSeconds );
-
-	
-
-	// Determines whether or not Lucidity is maintained when exposed to darkness.
-	bool bInnerRadiance;
+	void UpdateVisualFeedback( const float DeltaSeconds );
 
 	
 
@@ -209,8 +227,9 @@ public:
 
 	FORCEINLINE class ADirectionalLight* GetSun() const { return Sun; }
 	FORCEINLINE float GetLucidity() const { return Lucidity; }
-	FORCEINLINE float GetAbsorbtionRate() const { return AbsorbtionRate; }
-	FORCEINLINE bool HasInnerRadiance() const { return bInnerRadiance; }
+	FORCEINLINE float GetAbsorbtionRate() const { return AbsorbVelocity; }
+	
+	
 	
 };
 

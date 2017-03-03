@@ -16,6 +16,9 @@
 #include "Engine/LevelBounds.h"
 #include "CollisionQueryParams.h"
 #include "Materials/MaterialInstanceDynamic.h"
+#include "ParticleHelper.h"
+#include "Particles/ParticleSystem.h"
+#include "Particles/ParticleSystemComponent.h"
 
 #define print_color(text, time, color) if (GEngine) GEngine->AddOnScreenDebugMessage(-1, time, color, text)
 #define print(text) if (GEngine) GEngine->AddOnScreenDebugMessage(-1, 1.5, FColor::White, text )
@@ -26,10 +29,13 @@ const FName AAlexandriaCharacter::EmissiveStrName( TEXT( "EmissiveStrength" ) );
 const FName AAlexandriaCharacter::MatOpacityName( TEXT( "Opacity" ) );
 
 AAlexandriaCharacter::AAlexandriaCharacter():
+	bInnerRadiance(false),
+	InnerRadianceDecayTime(4.f),
 	Lucidity(0.f),
 	SunIntensity(0.f),
-	AbsorbtionRate(3.f), 
-	ConsumptionRate(3.f)
+	AbsorbVelocity(1.5f), 
+	ConsumeVelocity(3.f),
+	SunlightTemperature( 1850.f, 5750.f )
 
 {
 	
@@ -46,38 +52,62 @@ AAlexandriaCharacter::AAlexandriaCharacter():
 	}
 
 	// Radiance Setup
+	// Setup Light
 	{
-		
+		static const FName SMSocketName( TEXT( "BackSocket" ) );
+		RadianceLight = CreateDefaultSubobject<UPointLightComponent>( TEXT( "RadianceLight" ) );
+		RadianceLight->SetupAttachment( GetMesh(), SMSocketName );
+	}
+
+	// Setup Globe
+	{
+		RadianceGlobe = CreateDefaultSubobject<UStaticMeshComponent>( TEXT( "RadianceGlobe" ) );
 		static ConstructorHelpers::FObjectFinder<UMaterial> RadMatRef( TEXT( "Material'/Game/ThirdPersonCPP/Meshes/RadianceGlobeMaterial.RadianceGlobeMaterial'" ) );
 		if (RadMatRef.Succeeded()) {
 			RadianceMaterial = RadMatRef.Object;
 		}
-		RadianceLight = CreateDefaultSubobject<UPointLightComponent>( TEXT( "RadianceLight" ) );
 		static ConstructorHelpers::FObjectFinder<UStaticMesh> StaticRadianceGlobe( TEXT( "StaticMesh'/Game/ThirdPersonCPP/Meshes/RadianceGlobeSphere.RadianceGlobeSphere'" ) );
-		RadianceGlobeMesh = StaticRadianceGlobe.Object;
+		if (StaticRadianceGlobe.Succeeded()) {
+			RadianceGlobeMesh = StaticRadianceGlobe.Object;
 
-		RadianceGlobe = CreateDefaultSubobject<UStaticMeshComponent>( TEXT( "RadianceGlobe" ) );
-		RadianceGlobe->SetStaticMesh( RadianceGlobeMesh );
-		RadianceGlobe->bOwnerNoSee = false;
-		RadianceGlobe->bCastDynamicShadow = true;
-		RadianceGlobe->CastShadow = true;
-		RadianceGlobe->SetSimulatePhysics( false );
-		RadianceGlobe->BodyInstance.SetObjectType( ECollisionChannel::ECC_WorldDynamic );
-		RadianceGlobe->BodyInstance.SetCollisionEnabled( ECollisionEnabled::QueryOnly );
-		RadianceGlobe->BodyInstance.SetResponseToAllChannels( ECollisionResponse::ECR_Ignore );
-		RadianceGlobe->BodyInstance.SetResponseToChannel( ECollisionChannel::ECC_Pawn, ECollisionResponse::ECR_Block );
-		RadianceGlobe->BodyInstance.SetResponseToChannel( ECollisionChannel::ECC_WorldStatic, ECollisionResponse::ECR_Block );
-		RadianceGlobe->BodyInstance.SetResponseToChannel( ECollisionChannel::ECC_WorldDynamic, ECollisionResponse::ECR_Block );
-		RadianceGlobe->Mobility = EComponentMobility::Movable;
-		RadianceGlobe->SetHiddenInGame( false );
-
-		static const FName SMSocketName( TEXT( "BackSocket" ) );
-		static const FName CenterSocket( TEXT( "Center" ) );
-		RadianceLight->SetupAttachment( GetMesh(), SMSocketName );
-		RadianceGlobe->SetupAttachment( RadianceLight );
-		RadianceGlobe->bAutoRegister = true;
-
+			
+			RadianceGlobe->SetStaticMesh( RadianceGlobeMesh );
+			RadianceGlobe->bOwnerNoSee = false;
+			RadianceGlobe->bCastDynamicShadow = true;
+			RadianceGlobe->CastShadow = true;
+			RadianceGlobe->SetSimulatePhysics( false );
+			RadianceGlobe->BodyInstance.SetObjectType( ECollisionChannel::ECC_WorldDynamic );
+			RadianceGlobe->BodyInstance.SetCollisionEnabled( ECollisionEnabled::QueryOnly );
+			RadianceGlobe->BodyInstance.SetResponseToAllChannels( ECollisionResponse::ECR_Ignore );
+			RadianceGlobe->BodyInstance.SetResponseToChannel( ECollisionChannel::ECC_Pawn, ECollisionResponse::ECR_Block );
+			RadianceGlobe->BodyInstance.SetResponseToChannel( ECollisionChannel::ECC_WorldStatic, ECollisionResponse::ECR_Block );
+			RadianceGlobe->BodyInstance.SetResponseToChannel( ECollisionChannel::ECC_WorldDynamic, ECollisionResponse::ECR_Block );
+			RadianceGlobe->Mobility = EComponentMobility::Movable;
+			RadianceGlobe->SetHiddenInGame( false );
+			RadianceGlobe->SetupAttachment( RadianceLight );
+			RadianceGlobe->bAutoRegister = true;
+		}
 	}
+
+	// Setup Emitter
+	
+	{
+		RadianceFire = CreateDefaultSubobject<UParticleSystemComponent>( TEXT( "RadianceFire" ) );
+		static ConstructorHelpers::FObjectFinder<UParticleSystem> FireEmitter( TEXT( "ParticleSystem'/Game/StarterContent/Particles/P_Fire.P_Fire'" ) );
+		if (FireEmitter.Succeeded()) {
+			RadianceFireEmitter = FireEmitter.Object;
+			RadianceFire->SetTemplate( RadianceFireEmitter );
+			RadianceFire->bAutoActivate = true;
+			RadianceFire->bAutoRegister = true;
+			RadianceFire->bVisible = true;
+			RadianceFire->bVisualizeComponent = true;
+			static const FName CenterSocket( TEXT( "Center" ) );
+			RadianceFire->SetupAttachment( RadianceGlobe, CenterSocket );
+			//RadianceFire->bAutoActivate = HasInnerRadiance();
+		}
+			
+	}
+	
 
 	// FLucidMovement Base values
 	{
@@ -88,6 +118,7 @@ AAlexandriaCharacter::AAlexandriaCharacter():
 		LucidLateralAirFriction.Base = GetCharacterMovement()->FallingLateralFriction;
 		LucidJumpZ.Base = 600.f;
 		SunlightIntensity.Base = 2500.f;
+		SunlightTemperature.Base = 1.f;
 
 		RadianceGlobe->GetMaterial( 0 )->GetScalarParameterValue( MatOpacityName, MaterialOpacity.Base );
 		RadianceGlobe->GetMaterial( 0 )->GetScalarParameterValue( EmissiveStrName, EmissiveStrength.Base );
@@ -182,15 +213,20 @@ float AAlexandriaCharacter::CalcLucidity( const float DeltaSeconds )
 	// Get Lucidity from Light Levels affecting player
 	const float TickLucidity = (GetSolarIllumination( 4 ) + CalcDynamicLightRadiance( 4 )) / SunIntensity;
 	float DeltaLucidity = TickLucidity - GetLucidity();
-	const float MaxDeltaLucidity = SunIntensity*AbsorbtionRate*DeltaSeconds / SunIntensity;
+	const float MaxDeltaLucidity = SunIntensity*DeltaSeconds / SunIntensity;
 	
 	if (DeltaLucidity > 0.f)
 	{
+		DeltaLucidity *= AbsorbVelocity;
 		DeltaLucidity = FMath::Min<float>( DeltaLucidity, MaxDeltaLucidity );
 	}
 	else if (DeltaLucidity < 0.f)
 	{
+		DeltaLucidity *= ConsumeVelocity;
 		DeltaLucidity = -1.f*FMath::Min<float>( FMath::Abs<float>(DeltaLucidity), MaxDeltaLucidity );
+		if (HasInnerRadiance()) {
+			DeltaLucidity /= InnerRadianceDecayTime;
+		}
 	}
 	return FMath::Clamp<float>( GetLucidity()+DeltaLucidity, 0.f, 1.f );
 }
@@ -210,12 +246,34 @@ void AAlexandriaCharacter::UpdateMovementParams( const float DeltaSeconds )
 	
 
 	// Debug Prints
+	/*
 	print_color( FString::Printf( TEXT( "MaxWalkSpeed:    %f" ), Mvmt->MaxWalkSpeed ), DeltaSeconds, FColor::White );
 	print_color( FString::Printf( TEXT( "MaxAccelaration: %f" ), Mvmt->MaxAcceleration ), DeltaSeconds, FColor::White );
 	print_color( FString::Printf( TEXT( "JumpZVelocity:   %f" ), Mvmt->JumpZVelocity ), DeltaSeconds, FColor::White );
 	print_color( FString::Printf( TEXT( "GravityScale:    %f" ), Mvmt->GravityScale ), DeltaSeconds, FColor::White );
 	print_color( FString::Printf( TEXT( "AirControl:      %f" ), Mvmt->AirControl ), DeltaSeconds, FColor::White );
+	*/
 
+}
+
+void AAlexandriaCharacter::UpdateVisualFeedback( const float DeltaSeconds )
+{
+	//GetRadianceLight()->SetLightColor( SunColor*Lucidity );
+	GetRadianceLight()->SetTemperature( SunlightTemperature.GetProperty( Lucidity ) );
+	RadianceGlobe->SetScalarParameterValueOnMaterials( MatOpacityName, MaterialOpacity.GetProperty( Lucidity ) );
+	RadianceGlobe->SetScalarParameterValueOnMaterials( EmissiveStrName, EmissiveStrength.GetProperty( Lucidity ) );
+	RadianceGlobe->GetMaterial( 0 )->SetEmissiveBoost( Lucidity );
+	RadianceGlobe->GetMaterial( 0 )->SetDiffuseBoost( Lucidity );
+
+	if (HasInnerRadiance()) {
+		if (!RadianceFire->IsActive() && (Lucidity > SMALL_NUMBER)) {
+			RadianceFire->ActivateSystem( false );
+		}
+		else if (RadianceFire->IsActive() && (Lucidity <= SMALL_NUMBER)) {
+			RadianceFire->DeactivateSystem();
+		}
+		RadianceFire->SetRelativeScale3D( FVector( Lucidity ));
+	}
 }
 
 
@@ -315,16 +373,16 @@ void AAlexandriaCharacter::DebugPrintRadiance( const float DrawTime, const FVect
 void AAlexandriaCharacter::Tick( float DeltaSeconds )
 {
 	Super::Tick( DeltaSeconds );
+
 	Lucidity = CalcLucidity( DeltaSeconds );
+
+
 	GetRadianceLight()->SetIntensity( SunlightIntensity.GetProperty( Lucidity ) );
-	GetRadianceLight()->SetLightColor( SunColor*Lucidity );
-	RadianceGlobe->SetScalarParameterValueOnMaterials( MatOpacityName, MaterialOpacity.GetProperty(Lucidity));
-	RadianceGlobe->SetScalarParameterValueOnMaterials( EmissiveStrName, EmissiveStrength.GetProperty( Lucidity ) );
-	RadianceGlobe->GetMaterial( 0 )->SetEmissiveBoost( Lucidity );
-	RadianceGlobe->GetMaterial( 0 )->SetDiffuseBoost( Lucidity );
+	UpdateVisualFeedback( DeltaSeconds );
 	UpdateMovementParams( DeltaSeconds );
 
 	// Debug Prints
+	/*
 	float print_val = -1.f;
 	RadianceGlobe->GetMaterial( 0 )->GetScalarParameterValue( MatOpacityName, print_val );
 	print_color( FString::Printf( TEXT( "MatOpacity: %f" ), print_val ), DeltaSeconds, FColor::White );
@@ -332,8 +390,6 @@ void AAlexandriaCharacter::Tick( float DeltaSeconds )
 	print_val = -1.f;
 	RadianceGlobe->GetMaterial( 0 )->GetScalarParameterValue( EmissiveStrName, print_val );
 	print_color( FString::Printf( TEXT( "EmissiveStr: %f" ), print_val ), DeltaSeconds, FColor::White );
-
-	/*
 	DrawDebugString( GetWorld(), 
 		(FVector(GetCapsuleComponent()->Bounds.Origin.X, GetCapsuleComponent()->Bounds.Origin.Y, GetCapsuleComponent()->Bounds.Origin.Z+50.f)- GetCapsuleComponent()->Bounds.Origin), 
 		FString::SanitizeFloat( GetLucidity() ), 
@@ -355,6 +411,13 @@ void AAlexandriaCharacter::PostInitializeComponents()
 	}
 	RadianceMaterialInst = UMaterialInstanceDynamic::Create(RadianceMaterial, this, FName(TEXT("DynamicRadianceInst") ));
 	RadianceGlobe->SetMaterial( 0, RadianceMaterialInst );
+
+	if (HasInnerRadiance()) {
+		RadianceFire->ActivateSystem();
+	}
+	else {
+		RadianceFire->DeactivateSystem();
+	}
 }
 
 void AAlexandriaCharacter::BeginPlay()
@@ -366,13 +429,6 @@ void AAlexandriaCharacter::BeginPlay()
 		if (DLightItr) {
 			Sun = *DLightItr;
 		}
-
-		/*
-		GetRadianceLight()->SetLightColor( GetSun()->GetLightComponent()->GetLightColor() );
-		GetRadianceLight()->SetIntensity( GetSun()->GetLightComponent()->Intensity );
-		GetRadianceLight()->SetIndirectLightingIntensity( GetSun()->GetLightComponent()->IndirectLightingIntensity );
-		GetRadianceLight()->Activate();
-		*/
 	}
 }
 
@@ -562,13 +618,8 @@ float AAlexandriaCharacter::GetSolarIllumination( const int32 AvailableTraces )
 		if ((HitActor == nullptr) || (HitActor == this))
 		{
 			Solarity += Intensity;
-			DrawDebugLine( GetWorld(), Start, End, LightComp->GetLightColor().ToFColor( false ), false, GetWorld()->GetDeltaSeconds()*FMath::FRandRange(1.f, 5.f) );
+			//DrawDebugLine( GetWorld(), Start, End, LightComp->GetLightColor().ToFColor( false ), false, GetWorld()->GetDeltaSeconds()*FMath::FRandRange(1.f, 5.f) );
 
-		}
-		else
-		{
-			//DrawDebugLine( GetWorld(), Start, End, LightComp->GetLightColor().ToFColor(true), false, GetWorld()->GetDeltaSeconds()*5.f );
-			//print_color( FString::Printf( TEXT( "%s Hit Actor: %s" ), *Light->GetFName().ToString(), *HitActor->GetFName().ToString()  ), GetWorld()->GetDeltaSeconds(), FColor::Red );
 		}
 
 	}
@@ -578,18 +629,6 @@ float AAlexandriaCharacter::GetSolarIllumination( const int32 AvailableTraces )
 		return Solarity / (float)AvailableTraces;
 	}
 	return Solarity;
-}
-
-void AAlexandriaCharacter::GetPollPoints( TArray<FVector>& OutPoints ) const
-{
-	FVector PlayerEyesPos;
-	FRotator PlayerEyesRot;
-	GetActorEyesViewPoint( PlayerEyesPos, PlayerEyesRot );
-	FBoxSphereBounds PlayerBounds( GetCapsuleComponent()->Bounds );
-	OutPoints.AddUnique( FVector( PlayerBounds.Origin.X + 50.f, PlayerBounds.Origin.Y, PlayerBounds.Origin.Z) );
-	OutPoints.AddUnique( FVector( PlayerBounds.Origin.X - 50.f, PlayerBounds.Origin.Y, PlayerBounds.Origin.Z) );
-	OutPoints.AddUnique( FVector( PlayerEyesPos.X, PlayerEyesPos.Y, PlayerEyesPos.Z + 10.f ) );
-	OutPoints.AddUnique( FVector( PlayerBounds.Origin.X, PlayerBounds.Origin.Y, PlayerBounds.Origin.Z*2.f - PlayerBounds.GetBoxExtrema( 1 ).Z ) );
 }
 
 FVector AAlexandriaCharacter::GetPollPoint() const
