@@ -62,11 +62,11 @@ AAlexandriaCharacter::AAlexandriaCharacter():
 	// Setup Globe
 	{
 		RadianceGlobe = CreateDefaultSubobject<UStaticMeshComponent>( TEXT( "RadianceGlobe" ) );
-		static ConstructorHelpers::FObjectFinder<UMaterial> RadMatRef( TEXT( "Material'/Game/ThirdPersonCPP/Meshes/RadianceGlobeMaterial.RadianceGlobeMaterial'" ) );
+		static ConstructorHelpers::FObjectFinder<UMaterial> RadMatRef( TEXT( "Material'/Game/Alexandria/Character/RadianceGlobeMaterial.RadianceGlobeMaterial'" ) );
 		if (RadMatRef.Succeeded()) {
 			RadianceMaterial = RadMatRef.Object;
 		}
-		static ConstructorHelpers::FObjectFinder<UStaticMesh> StaticRadianceGlobe( TEXT( "StaticMesh'/Game/ThirdPersonCPP/Meshes/RadianceGlobeSphere.RadianceGlobeSphere'" ) );
+		static ConstructorHelpers::FObjectFinder<UStaticMesh> StaticRadianceGlobe( TEXT( "Material'/Game/Alexandria/Character/RadianceGlobeSphere.RadianceGlobeSphere'" ) );
 		if (StaticRadianceGlobe.Succeeded()) {
 			RadianceGlobeMesh = StaticRadianceGlobe.Object;
 
@@ -93,7 +93,7 @@ AAlexandriaCharacter::AAlexandriaCharacter():
 	
 	{
 		RadianceFire = CreateDefaultSubobject<UParticleSystemComponent>( TEXT( "RadianceFire" ) );
-		static ConstructorHelpers::FObjectFinder<UParticleSystem> FireEmitter( TEXT( "ParticleSystem'/Game/StarterContent/Particles/P_Fire.P_Fire'" ) );
+		static ConstructorHelpers::FObjectFinder<UParticleSystem> FireEmitter( TEXT( "ParticleSystem'/Game/Alexandria/Particle/P_Fire.P_Fire'" ) );
 		if (FireEmitter.Succeeded()) {
 			RadianceFireEmitter = FireEmitter.Object;
 			RadianceFire->SetTemplate( RadianceFireEmitter );
