@@ -205,6 +205,8 @@ private:
 	float SunIntensity;
 	float BaseSunIntensity;
 
+	float TimeSinceLastUptick;
+
 	FLinearColor SunColor;
 	// Determines whether or not Lucidity is maintained when exposed to darkness.
 

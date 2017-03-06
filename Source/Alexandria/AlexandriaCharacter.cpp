@@ -35,6 +35,7 @@ AAlexandriaCharacter::AAlexandriaCharacter():
 	SunIntensity(0.f),
 	AbsorbVelocity(1.5f), 
 	ConsumeVelocity(3.f),
+	TimeSinceLastUptick(0.f),
 	SunlightTemperature( 1850.f, 5750.f )
 
 {
@@ -218,16 +219,24 @@ float AAlexandriaCharacter::CalcLucidity( const float DeltaSeconds )
 	const float MaxDeltaLucidity = SunIntensity*DeltaSeconds / BaseSunIntensity;
 	
 	if (DeltaLucidity > 0.f)
-	{
+	{	
+		TimeSinceLastUptick = 0.f;
 		DeltaLucidity *= AbsorbVelocity;
+		if (HasInnerRadiance()) {
+			DeltaLucidity *= InnerRadianceDecayTime;
+		}
 		DeltaLucidity = FMath::Min<float>( DeltaLucidity, MaxDeltaLucidity );
 	}
 	else if (DeltaLucidity < 0.f)
 	{
+		
 		DeltaLucidity *= ConsumeVelocity;
 		DeltaLucidity = -1.f*FMath::Min<float>( FMath::Abs<float>(DeltaLucidity), MaxDeltaLucidity );
 		if (HasInnerRadiance()) {
-			DeltaLucidity /= InnerRadianceDecayTime;
+			if (TimeSinceLastUptick < 3.0f) {
+				return GetLucidity();
+			}
+			DeltaLucidity /= (InnerRadianceDecayTime*2);
 		}
 	}
 	return FMath::Clamp<float>( GetLucidity()+DeltaLucidity, 0.f, 1.f );
@@ -546,19 +555,19 @@ float AAlexandriaCharacter::CalcDynamicLightRadiance( const int32 AvailableTrace
 			const float AttenRadius = LightComp->AttenuationRadius;
 			if ((AttenRadius> SMALL_NUMBER) && (DistanceToPlayer<AttenRadius)) {
 				const float Scalar = (AttenRadius - DistanceToPlayer) / AttenRadius;
-				print_color( FString::SanitizeFloat( Scalar), GetWorld()->GetDeltaSeconds(), FColor::Red );
 				Brightness = BaseSunIntensity*Scalar;
 			}
 		}
 		Luminance += Brightness;
 		++TraceCount;
-		
+		/*
 		print_color( FString::SanitizeFloat( DistanceToPlayer ), GetWorld()->GetDeltaSeconds(), FColor::Red );
 		print_color( FString::SanitizeFloat( LightComp->AttenuationRadius), GetWorld()->GetDeltaSeconds(), FColor::Red );
 		print_color( FString::SanitizeFloat( Brightness ), GetWorld()->GetDeltaSeconds(), FColor::Green );
 		print_color( FString::SanitizeFloat( GetLucidity() ), GetWorld()->GetDeltaSeconds(), FColor::Yellow);
 		print_color( FString::SanitizeFloat( BaseSunIntensity ), GetWorld()->GetDeltaSeconds(), FColor::Yellow );
 		print_color( LightComp->GetFName().ToString(), GetWorld()->GetDeltaSeconds(), FColor::White );
+		*/
 	}
 	if (TraceCount > 0)
 	{
