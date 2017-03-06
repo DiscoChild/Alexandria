@@ -209,11 +209,13 @@ float AAlexandriaCharacter::CalcLucidity( const float DeltaSeconds )
 	float Weight = 0.f;
 	FVector SkyBent = FVector::ZeroVector;
 	const FBoxSphereBounds PlayerBounds( GetCapsuleComponent()->Bounds );
+	//const float IncidentLuminance = CalcPlayerIncidentRadiance( PlayerBounds, Radiance, Shadowing, Weight, SkyBent );
+
 
 	// Get Lucidity from Light Levels affecting player
-	const float TickLucidity = (GetSolarIllumination( 4 ) + CalcDynamicLightRadiance( 4 )) / SunIntensity;
+	const float TickLucidity = (GetSolarIllumination( 4 ) + CalcDynamicLightRadiance( 4 ) /*+ IncidentLuminance */);
 	float DeltaLucidity = TickLucidity - GetLucidity();
-	const float MaxDeltaLucidity = SunIntensity*DeltaSeconds / SunIntensity;
+	const float MaxDeltaLucidity = SunIntensity*DeltaSeconds / BaseSunIntensity;
 	
 	if (DeltaLucidity > 0.f)
 	{
@@ -258,6 +260,7 @@ void AAlexandriaCharacter::UpdateMovementParams( const float DeltaSeconds )
 
 void AAlexandriaCharacter::UpdateVisualFeedback( const float DeltaSeconds )
 {
+	GetRadianceLight()->SetIntensity( SunlightIntensity.GetProperty( Lucidity ) );
 	//GetRadianceLight()->SetLightColor( SunColor*Lucidity );
 	GetRadianceLight()->SetTemperature( SunlightTemperature.GetProperty( Lucidity ) );
 	RadianceGlobe->SetScalarParameterValueOnMaterials( MatOpacityName, MaterialOpacity.GetProperty( Lucidity ) );
@@ -377,7 +380,7 @@ void AAlexandriaCharacter::Tick( float DeltaSeconds )
 	Lucidity = CalcLucidity( DeltaSeconds );
 
 
-	GetRadianceLight()->SetIntensity( SunlightIntensity.GetProperty( Lucidity ) );
+	
 	UpdateVisualFeedback( DeltaSeconds );
 	UpdateMovementParams( DeltaSeconds );
 
@@ -428,8 +431,14 @@ void AAlexandriaCharacter::BeginPlay()
 		TActorIterator<ADirectionalLight> DLightItr( GetWorld() );
 		if (DLightItr) {
 			Sun = *DLightItr;
+			ULightComponent *LightComp = GetSun()->GetLightComponent();
+			//const FVector LightPos( LightComp->GetLightPosition() );
+			const float Intensity = LightComp->ComputeLightBrightness();
+			BaseSunIntensity = Intensity;
 		}
 	}
+
+
 }
 
 ULocalPlayer* AAlexandriaCharacter::GetLocalPlayer() const
@@ -460,19 +469,15 @@ FSceneView* AAlexandriaCharacter::GetPlayerSceneView( ULocalPlayer* LocPlayer )
 
 float AAlexandriaCharacter::CalcPlayerIncidentRadiance( const FBoxSphereBounds &Bounds, FSHVectorRGB3 &Radiance, float &Shadowing, float &Weight, FVector &SkyBent ) const
 {
+	if (!GetWorld()->AreAlwaysLoadedLevelsLoaded()) {
+		return 0.f;
+	}
 	const FLevelCollection* const ActiveLevels = GetWorld()->GetActiveLevelCollection();
 	if (ActiveLevels == nullptr)
 	{
 		return 0.f;
 	}
 	const FVector PollPoint = Bounds.GetBox().GetCenter();
-
-	TArray<FSHVectorRGB3> RadianceArray;
-	TArray<float> WeightArray;
-	TArray<float> ShadowingArray;
-	TArray<float> LuminanceArray;
-	TArray<FVector> SkyBentArray;
-	const FSHVector3 Ambient = FSHVector3::AmbientFunction();
 
 	FSHVectorRGB3 LocRadiance;
 	float LocWeight = 0.f;
@@ -484,64 +489,82 @@ float AAlexandriaCharacter::CalcPlayerIncidentRadiance( const FBoxSphereBounds &
 		LevelIter; ++LevelIter)
 	{
 		ULevel* Level = *LevelIter;
-		FPrecomputedLightVolume* PLV = Level->PrecomputedLightVolume;
-		PLV->InterpolateIncidentRadiancePoint( PollPoint, LocWeight, LocShadowing, LocRadiance, LocSkyBent );
+		if (Level != nullptr)
+		{
+			FPrecomputedLightVolume* PLV = Level->PrecomputedLightVolume;
+			if (PLV != nullptr)
+			{
+				PLV->InterpolateIncidentRadiancePoint( PollPoint, LocWeight, LocShadowing, LocRadiance, LocSkyBent );
+			}
+		}
 	}
-	if (LocWeight != 0.f)
+
+	if (LocWeight > SMALL_NUMBER )
 	{
 		const float InvWeight = 1.f / LocWeight;
 		LocRadiance *= InvWeight;
 		LocShadowing *= InvWeight;
 	}
-	LocLuminance = Dot( LocRadiance, Ambient ).GetLuminance();
-	//LocLuminance = LocRadiance.GetLuminance().CalcIntegral();
+	else if (LocShadowing <= SMALL_NUMBER) {
+		return 0.0f;
+	}
 
 	Radiance += LocRadiance;
 	SkyBent += LocSkyBent;
 	Weight += LocWeight;
 	Shadowing += LocShadowing;
-	return LocLuminance;
+	return Dot( LocRadiance, FSHVector3::AmbientFunction() ).GetLuminance();
 }
 
 
 
 float AAlexandriaCharacter::CalcDynamicLightRadiance( const int32 AvailableTraces ) const
 {
-	float Intensity = 0.f;
+	float Luminance = 0.f;
 	int32 TraceCount = 0;
-	for (TActorIterator<APointLight> LightIter( GetWorld(), APointLight::StaticClass() ); LightIter; ++LightIter)
+
+	for (TObjectIterator<UPointLightComponent> LightIter; LightIter; ++LightIter)
 	{
 		if (TraceCount >= AvailableTraces)
 		{
 			break;
 		}
-		APointLight *Light = *LightIter;
-		if ((Light == nullptr) || (Light->GetLightComponent()->AffectsPrimitive( GetMesh() ) == false))
+		UPointLightComponent *LightComp= *LightIter;
+		static const FName CompTag = FName( TEXT( "Lucidity" ) );
+		
+		if ((LightComp == nullptr) || (!LightComp->ComponentHasTag( CompTag )) || (LightComp->AffectsPrimitive( GetMesh() ) == false))
 		{
 			continue;
 		}
 
 		//Get Light info for calculating effect on player
-		ULightComponent *LightComp = Light->GetLightComponent();
-		const float LRadius = FMath::Abs<float>( LightComp->SceneProxy->GetRadius() );
-		if (FMath::Abs( LRadius ) < SMALL_NUMBER)
-		{
-			// Something not right here...
-			continue;
-		}
 		const FVector LightPos = FVector( LightComp->GetLightPosition() );
 		const float DistanceToPlayer = FMath::Abs<float>( FVector::Dist( LightPos, GetActorLocation() ) );
-		const float LIntensity = LightComp->ComputeLightBrightness();
-
-		const float effect = (LIntensity *(DistanceToPlayer / FMath::Max<float>( LRadius, DistanceToPlayer )));
-		Intensity += effect;
+		const float BaseBrightness = LightComp->ComputeLightBrightness();
+		float Brightness = 0.f;
+		if (BaseBrightness > SMALL_NUMBER) {
+			const float AttenRadius = LightComp->AttenuationRadius;
+			if ((AttenRadius> SMALL_NUMBER) && (DistanceToPlayer<AttenRadius)) {
+				const float Scalar = (AttenRadius - DistanceToPlayer) / AttenRadius;
+				print_color( FString::SanitizeFloat( Scalar), GetWorld()->GetDeltaSeconds(), FColor::Red );
+				Brightness = BaseSunIntensity*Scalar;
+			}
+		}
+		Luminance += Brightness;
 		++TraceCount;
+		
+		print_color( FString::SanitizeFloat( DistanceToPlayer ), GetWorld()->GetDeltaSeconds(), FColor::Red );
+		print_color( FString::SanitizeFloat( LightComp->AttenuationRadius), GetWorld()->GetDeltaSeconds(), FColor::Red );
+		print_color( FString::SanitizeFloat( Brightness ), GetWorld()->GetDeltaSeconds(), FColor::Green );
+		print_color( FString::SanitizeFloat( GetLucidity() ), GetWorld()->GetDeltaSeconds(), FColor::Yellow);
+		print_color( FString::SanitizeFloat( BaseSunIntensity ), GetWorld()->GetDeltaSeconds(), FColor::Yellow );
+		print_color( LightComp->GetFName().ToString(), GetWorld()->GetDeltaSeconds(), FColor::White );
 	}
 	if (TraceCount > 0)
 	{
-		return Intensity / (float)TraceCount;
+		Luminance/= (float)TraceCount;
 	}
-	return Intensity;
+	return Luminance/BaseSunIntensity;
 
 }
 
@@ -555,15 +578,18 @@ float AAlexandriaCharacter::GetSolarIllumination( const int32 AvailableTraces )
 	float Solarity = 0.f;
 	int32 TraceCount = 0;
 	//Get Light info for calculating effect on player
+
 	ULightComponent *LightComp = GetSun()->GetLightComponent();
 	const FVector LightPos( LightComp->GetLightPosition() );
+	const FLinearColor TempSunColor = (LightComp->bUseTemperature) ? FLinearColor::MakeFromColorTemperature( LightComp->Temperature ) : LightComp->GetLightColor();
 	const float Intensity = LightComp->ComputeLightBrightness();
-
-	
-
-	// Update SunlightIntensity
 	SunIntensity = Intensity;
-	RadianceColor = LightComp->GetLightColor();
+	
+	RadianceColor = TempSunColor;
+	if (Intensity < SMALL_NUMBER ){
+		return 0.f;
+
+	}
 
 	// Get ray traces projected onto plane
 	FVector Plane( LightComp->GetDirection() );
@@ -595,7 +621,7 @@ float AAlexandriaCharacter::GetSolarIllumination( const int32 AvailableTraces )
 			t = FVector::DotProduct( EndStartVec, Plane ) / cs;
 			Start = End + (InvPlane*t);
 		}
-		
+
 		/*
 		t = 0.f;
 		FVector StartEndVec( End - Start );
@@ -606,7 +632,7 @@ float AAlexandriaCharacter::GetSolarIllumination( const int32 AvailableTraces )
 			End = Start + (Plane*t);
 		}
 		*/
-		
+
 
 		FVector HitLocation = FVector::ZeroVector;
 		FVector HitNormal = FVector::ForwardVector;
@@ -618,17 +644,21 @@ float AAlexandriaCharacter::GetSolarIllumination( const int32 AvailableTraces )
 		if ((HitActor == nullptr) || (HitActor == this))
 		{
 			Solarity += Intensity;
-			//DrawDebugLine( GetWorld(), Start, End, LightComp->GetLightColor().ToFColor( false ), false, GetWorld()->GetDeltaSeconds()*FMath::FRandRange(1.f, 5.f) );
+			//DrawDebugLine( GetWorld(), Start, End, LightComp->GetLightColor().ToFColor( false ), false, GetWorld()->GetDeltaSeconds()*FMath::FRandRange( 1.f, 5.f ) );
 
+		}
+		else
+		{
+			//print_color( HitActor->GetFName().ToString(), GetWorld()->GetDeltaSeconds(), FColor::White );
 		}
 
 	}
 
 	if (AvailableTraces > 0)
 	{
-		return Solarity / (float)AvailableTraces;
+		Solarity /= (float)AvailableTraces;
 	}
-	return Solarity;
+	return Solarity/BaseSunIntensity;
 }
 
 FVector AAlexandriaCharacter::GetPollPoint() const
@@ -636,7 +666,7 @@ FVector AAlexandriaCharacter::GetPollPoint() const
 	FVector PollPoint( GetActorLocation() );
 	PollPoint.X += FMath::FRandRange( -50.f, 50.f );
 	PollPoint.Y += FMath::FRandRange( -50.f, 50.f );
-	PollPoint.Z += FMath::FRandRange( -100.f, 100.f );
+	PollPoint.Z += FMath::FRandRange( -90.f, 100.f );
 
 	return PollPoint;
 }
